@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import os
 from typing import Optional
 
 import torch
@@ -32,6 +33,32 @@ from sglang.srt.utils import is_hip
 
 _is_hip = is_hip()
 
+_flydsl_available = False
+if _is_hip:
+    try:
+        from sglang.srt.layers.attention.fla.flydsl_chunk_gdn import (
+            flydsl_chunk_gdn_fwd,
+            is_flydsl_supported,
+        )
+        _flydsl_available = True
+    except ImportError:
+        pass
+
+_use_flydsl = _flydsl_available and os.environ.get("SGLANG_USE_FLYDSL_CHUNK_GDN", "0") == "1"
+
+_flydsl_wiki_available = False
+if _is_hip:
+    try:
+        from sglang.srt.layers.attention.fla.flydsl_chunk_gdn_wiki import (
+            flydsl_chunk_gdn_wiki_fwd,
+            is_flydsl_wiki_supported,
+        )
+        _flydsl_wiki_available = True
+    except ImportError:
+        pass
+
+_use_flydsl_wiki = _flydsl_wiki_available and os.environ.get("USE_FLYDSL_WIKI", "0") == "1"
+
 
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
@@ -46,6 +73,24 @@ def chunk_gated_delta_rule_fwd(
 ):
     B, T = q.shape[0], q.shape[1]
     Hv = g.shape[2]
+
+    if _use_flydsl_wiki and T >= 64 and is_flydsl_wiki_supported(q, v, T):
+        return flydsl_chunk_gdn_wiki_fwd(
+            q=q, k=k, v=v, g=g, beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            initial_state_indices=initial_state_indices,
+            cu_seqlens=cu_seqlens,
+        )
+
+    if _use_flydsl and T >= 64 and is_flydsl_supported(q, v, T):
+        return flydsl_chunk_gdn_fwd(
+            q=q, k=k, v=v, g=g, beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            initial_state_indices=initial_state_indices,
+            cu_seqlens=cu_seqlens,
+        )
 
     if _is_hip and T >= 64:
         g, A = fused_cumsum_kkt(g, k, beta, chunk_size=64, cu_seqlens=cu_seqlens)
