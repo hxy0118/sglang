@@ -311,34 +311,34 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             )
         ]
 
-    def _get_shared_expert_weights(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Return sigmoid(shared_expert_gate) for fused shared expert weights."""
+    def _get_shared_expert_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Return raw gate logits (bf16) for fused shared expert. Sigmoid is computed in fp32 inside the fused kernel."""
         if not self.enable_shared_expert_fusion or self.shared_expert_gate is None:
             return None
         shared_out = self.shared_expert_gate(hidden_states)
         shared_logits = shared_out[0] if isinstance(shared_out, tuple) else shared_out
-        return F.sigmoid(shared_logits)
+        return shared_logits
 
     def _append_shared_to_topk_output(
         self,
         topk_output: StandardTopKOutput,
         hidden_states: torch.Tensor,
     ) -> StandardTopKOutput:
-        """Append shared expert ids and weights to topk output before fused MoE."""
+        """Append shared expert ids and sigmoid-gated weights to topk output before fused MoE."""
         if not self.enable_shared_expert_fusion:
             return topk_output
-        shared_weights = self._get_shared_expert_weights(hidden_states)
-        if shared_weights is None:
+        shared_logits = self._get_shared_expert_logits(hidden_states)
+        if shared_logits is None:
             return topk_output
 
         from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_kernels import (
-            fused_append_shared_experts_with_weights,
+            fused_append_shared_experts_with_sigmoid,
         )
 
-        fused_topk_ids, fused_topk_weights = fused_append_shared_experts_with_weights(
+        fused_topk_ids, fused_topk_weights = fused_append_shared_experts_with_sigmoid(
             topk_output.topk_ids,
             topk_output.topk_weights,
-            shared_weights,
+            shared_logits,
             self.num_fused_shared_experts,
             N=self.num_experts,
         )
@@ -396,7 +396,6 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         return final_hidden_states
 
     def _forward_router_experts(self, hidden_states: torch.Tensor):
-        # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
         if self.enable_shared_expert_fusion and TopKOutputChecker.format_is_standard(
