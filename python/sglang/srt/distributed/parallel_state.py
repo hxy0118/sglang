@@ -405,6 +405,22 @@ class GroupCoordinator:
                         "(custom AR disabled, QR init failed)"
                     )
 
+        self.trt_ar_comm: Optional[Any] = None
+        if is_hip() and self.world_size > 1 and get_bool_env_var("SGLANG_USE_TRT_ALLREDUCE", default="false"):
+            try:
+                from sglang.srt.distributed.device_communicators.trt_allreduce import (
+                    TrtAllReduceComm,
+                )
+                self.trt_ar_comm = TrtAllReduceComm(
+                    group=self.cpu_group,
+                    device=self.local_rank,
+                )
+                if self.trt_ar_comm.disabled:
+                    self.trt_ar_comm = None
+            except Exception as e:
+                logger.warning("TRT allreduce init failed: %s", e)
+                self.trt_ar_comm = None
+
         self.torch_symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
         if self.use_torch_symm_mem_all_reduce and self.world_size > 1:
             self.torch_symm_mem_comm = TorchSymmMemCommunicator(
@@ -503,6 +519,8 @@ class GroupCoordinator:
         # is already collected in init() and we can capture the quick allreduce directly.
         ca_comm = self.ca_comm
         maybe_ca_context = nullcontext() if ca_comm is None else ca_comm.capture()
+        trt_ar_comm = self.trt_ar_comm
+        maybe_trt_ar_context = nullcontext() if trt_ar_comm is None else trt_ar_comm.capture()
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -510,7 +528,7 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with self.device_module.stream(stream), maybe_ca_context:
+        with self.device_module.stream(stream), maybe_ca_context, maybe_trt_ar_context:
             # In graph mode, we have to be very careful about the collective
             # operations. The current status is:
             #     allreduce \ Mode   |  Eager  |  Graph  |
@@ -597,6 +615,9 @@ class GroupCoordinator:
             else:
                 torch.distributed.all_reduce(input_, group=self.device_group)
             return input_
+
+        if self.trt_ar_comm is not None and self.trt_ar_comm.should_use(input_):
+            return self.trt_ar_comm.allreduce(input_)
 
         if self.hpu_communicator is not None and not self.hpu_communicator.disabled:
             return self.hpu_communicator.all_reduce(input_)
