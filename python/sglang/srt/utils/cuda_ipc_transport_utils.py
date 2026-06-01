@@ -215,6 +215,9 @@ class MmItemMemoryPool:
         self.available_chunks = merged_chunks
 
 
+_ipc_storage_cache = {}
+
+
 class CudaIpcTensorTransportProxy:
     """
     A torch.tensor's proxy used to do inter-process data-sharing
@@ -316,7 +319,12 @@ class CudaIpcTensorTransportProxy:
             try:
                 target_device = torch.device(f"cuda:{source_device_index}")
                 with torch.cuda.device(target_device):
-                    storage = torch.UntypedStorage._new_shared_cuda(*handle)
+                    cache_key = (source_device_index, handle[1])
+                    storage = _ipc_storage_cache.get(cache_key)
+                    if storage is None:
+                        storage = torch.UntypedStorage._new_shared_cuda(*handle)
+                        _ipc_storage_cache[cache_key] = storage
+
                     slice_tensor = torch.empty(
                         0, dtype=dtype, device=target_device
                     ).set_(storage, storage_offset=s_offset, size=shape, stride=stride)
