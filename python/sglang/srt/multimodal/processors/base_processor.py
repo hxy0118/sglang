@@ -1,3 +1,4 @@
+import asyncio
 import concurrent
 import concurrent.futures
 import dataclasses
@@ -639,7 +640,7 @@ class BaseMultimodalProcessor(ABC):
 
         return is_precomputed, images, videos, audios
 
-    def load_mm_data(
+    async def load_mm_data(
         self,
         prompt: str,
         multimodal_tokens: MultimodalSpecialTokens,
@@ -682,7 +683,7 @@ class BaseMultimodalProcessor(ABC):
             or cnt[Modality.AUDIO] != n_audio
             or getattr(self, "support_dynamic_frame_expansion", False)
         ):
-            return self.legacy_load_mm_data(
+            return await self.legacy_load_mm_data(
                 prompt=prompt,
                 multimodal_tokens=multimodal_tokens,
                 image_data=image_data,
@@ -694,7 +695,7 @@ class BaseMultimodalProcessor(ABC):
             )
         # For models other than MiniCPMO and MiniCPMV,
         # totally align multimodal_tokens, fast path
-        return self.fast_load_mm_data(
+        return await self.fast_load_mm_data(
             prompt=prompt,
             multimodal_tokens=multimodal_tokens,
             image_data=image_data,
@@ -705,7 +706,7 @@ class BaseMultimodalProcessor(ABC):
             audio_sample_rate=audio_sample_rate,
         )
 
-    def fast_load_mm_data(
+    async def fast_load_mm_data(
         self,
         prompt: str,
         multimodal_tokens: MultimodalSpecialTokens,
@@ -761,7 +762,7 @@ class BaseMultimodalProcessor(ABC):
 
         for modality, idx, future in futures:
             try:
-                result = future.result()
+                result = await asyncio.wrap_future(future)
             except Exception as e:
                 logger.exception(
                     "[load_mm_data(simple)] error loading %s data at index=%d",
@@ -812,7 +813,7 @@ class BaseMultimodalProcessor(ABC):
             input_text=prompt_str,
         )
 
-    def legacy_load_mm_data(
+    async def legacy_load_mm_data(
         self,
         prompt: str,
         multimodal_tokens: MultimodalSpecialTokens,
@@ -868,7 +869,7 @@ class BaseMultimodalProcessor(ABC):
         for idx, (future, (modality, raw_data, frame_limit)) in enumerate(
             zip(futures, task_info)
         ):
-            result = future.result()
+            result = await asyncio.wrap_future(future)
 
             # Check if this is an image tuple result
             if (
