@@ -77,13 +77,16 @@ class SocketMapping:
 
     def send_output(self, ipc_name: str, output: Any):
         if ipc_name is None:
-            # Some unhandled cases
             logger.warning(f"IPC name is None, output type={type(output)}, skipping...")
             return
 
         if ipc_name not in self._mapping:
             self._register_ipc_mapping(ipc_name, is_tokenizer=False)
         self._mapping[ipc_name].send_pyobj(output)
+
+    def broadcast(self, output: Any):
+        for socket in self._mapping.values():
+            socket.send_pyobj(output)
 
 
 def _extract_field_by_index(
@@ -391,6 +394,9 @@ class MultiTokenizerRouter:
     async def _distribute_result_to_workers(self, recv_obj):
         # Distribute result to each worker
         if isinstance(recv_obj, BaseReq):
+            if recv_obj.http_worker_ipc is None:
+                self.socket_mapping.broadcast(recv_obj)
+                return
             ipc_names = [recv_obj.http_worker_ipc]
         elif isinstance(recv_obj, BaseBatchReq):
             ipc_names = recv_obj.http_worker_ipcs
