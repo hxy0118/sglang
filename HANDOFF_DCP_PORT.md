@@ -156,6 +156,8 @@ python3 -m sglang.launch_server --model <small-qwen3.5-or-gqa> \
 ---
 
 ## 7. 参考
-- 调研与方案全文：`../CP并行支持调研报告.md`（§3 #25090 方案详解、§4 移植计划、§5 优化方向、§6 GDN 线性层 CP）
+- 调研与方案全文：`./CP并行支持调研报告.md`（§3 #25090 方案详解、§4 移植计划、§5 优化方向、§6 GDN 线性层 CP）
+- 服务器开工 prompt：`./DCP_RESUME_PROMPT.md`（直接贴给服务器上的 Claude Code）
+- #25090 AMD DCP 单测：`test/registered/amd/test_triton_attention_dcp.py` / `test_triton_attention_dcp_utils.py`（已在仓内；`cp_lse_ag_out_rs` 单测部分现在即可跑 = §5(a) 验证）
 - #25090：https://github.com/sgl-project/sglang/pull/25090
 - DCP 机制对照（vLLM）：issue #34018、PR #24864/#41160；论文 Helix arXiv:2507.07120
