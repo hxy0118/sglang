@@ -367,6 +367,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # For matryoshka embeddings
     dimensions: Optional[list[int]] = None
 
+    # DCP port: decode context parallel KV write mask (token i written only
+    # on the rank that owns it, i.e. positions % dcp_size == dcp_rank).
+    dcp_kv_mask: Optional[torch.Tensor] = None
+
     # Record the split metadata of the sequence number of NSA context parallels.
     nsa_cp_metadata: Optional[NSAContextParallelMetadata] = None
 
@@ -522,6 +526,11 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 model_runner.lora_manager.fetch_new_loras(set(ret.lora_ids))
 
             model_runner.lora_manager.prepare_lora_batch(ret)
+
+        if model_runner.dcp_size > 1 and ret.out_cache_loc is not None:
+            ret.dcp_kv_mask = (
+                ret.positions % model_runner.dcp_size == model_runner.dcp_rank
+            )
 
         return ret
 

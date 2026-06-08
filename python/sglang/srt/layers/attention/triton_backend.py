@@ -7,8 +7,17 @@ import torch
 import triton
 import triton.language as tl
 
+from sglang.srt.distributed.device_communicators.pynccl_allocator import (
+    use_symmetric_memory,
+)
+from sglang.srt.distributed.parallel_state import get_dcp_group
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
-from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
+from sglang.srt.layers.attention.utils import (
+    cp_lse_ag_out_rs,
+    create_flashinfer_kv_indices_triton,
+    create_triton_kv_indices_for_dcp_triton,
+    get_dcp_lens,
+)
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -86,9 +95,14 @@ class TritonAttnBackend(AttentionBackend):
         self.token_to_kv_pool_allocator = model_runner.token_to_kv_pool_allocator
         self.num_draft_tokens = model_runner.server_args.speculative_num_draft_tokens
         self.speculative_num_steps = model_runner.server_args.speculative_num_steps
+        # DCP port: decode-context-parallel rank/size for this backend.
+        self.dcp_size = model_runner.dcp_size
+        self.dcp_rank = model_runner.dcp_rank
+        # Under DCP the decode kernel runs on all-gathered query heads
+        # (local heads * dcp_size), so size attn_logits/attn_lse buffers for it.
         self.num_head = (
             model_runner.model_config.num_attention_heads // get_attention_tp_size()
-        )
+        ) * self.dcp_size
         self.num_kv_head = model_runner.model_config.get_num_kv_heads(
             get_attention_tp_size()
         )
@@ -230,6 +244,64 @@ class TritonAttnBackend(AttentionBackend):
             self.device_core_count,
             MAX_NUM_SEQ=SCHEDULE_SEQ,
         )
+
+    # ------------------------------------------------------------------
+    # DCP port (sglang PR #25090): decode-context-parallel KV indexing.
+    # Each rank owns tokens where pos % dcp_size == dcp_rank; these helpers
+    # build the per-rank local kv_indptr/kv_indices over the sharded cache.
+    # ------------------------------------------------------------------
+    def _dcp_lens(self, lens: torch.Tensor, start: Optional[torch.Tensor] = None):
+        return get_dcp_lens(lens, self.dcp_size, self.dcp_rank, start)
+
+    def _create_dcp_kv_indices(
+        self,
+        req_pool_indices: torch.Tensor,
+        lens: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_start_idx: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        dcp_lens = self._dcp_lens(lens, kv_start_idx)
+        kv_indptr[1 : len(req_pool_indices) + 1] = torch.cumsum(dcp_lens, dim=0)
+        kv_indptr = kv_indptr[: len(req_pool_indices) + 1]
+        kv_indices = torch.empty(
+            int(dcp_lens.sum().item()), dtype=torch.int64, device=self.device
+        )
+        create_triton_kv_indices_for_dcp_triton[(len(req_pool_indices),)](
+            self.req_to_token,
+            req_pool_indices,
+            dcp_lens,
+            kv_indptr,
+            kv_start_idx,
+            kv_indices,
+            self.req_to_token.stride(0),
+            self.dcp_size,
+            self.dcp_rank,
+        )
+        return kv_indptr, kv_indices
+
+    def _fill_dcp_kv_indices(
+        self,
+        req_pool_indices: torch.Tensor,
+        lens: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        kv_start_idx: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        dcp_lens = self._dcp_lens(lens, kv_start_idx)
+        kv_indptr[1 : len(req_pool_indices) + 1] = torch.cumsum(dcp_lens, dim=0)
+        kv_indptr = kv_indptr[: len(req_pool_indices) + 1]
+        create_triton_kv_indices_for_dcp_triton[(len(req_pool_indices),)](
+            self.req_to_token,
+            req_pool_indices,
+            dcp_lens,
+            kv_indptr,
+            kv_start_idx,
+            kv_indices,
+            self.req_to_token.stride(0),
+            self.dcp_size,
+            self.dcp_rank,
+        )
+        return kv_indptr, kv_indices, dcp_lens
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Init auxiliary variables for triton attention backend."""

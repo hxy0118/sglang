@@ -111,6 +111,9 @@ def enable_fused_set_kv_buffer(forward_batch: ForwardBatch):
         and hasattr(forward_batch.token_to_kv_pool, "dtype")
         and forward_batch.token_to_kv_pool.dtype == torch.bfloat16
         and not isinstance(forward_batch.token_to_kv_pool, SWAKVPool)
+        # DCP port: under decode context parallel the KV write must go through
+        # the masked path, so disable the fused set_kv_buffer fast path.
+        and getattr(forward_batch, "dcp_kv_mask", None) is None
     )
 
 
